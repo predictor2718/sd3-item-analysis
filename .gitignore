@@ -1,0 +1,6 @@
+src_data/
+output_data/
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj

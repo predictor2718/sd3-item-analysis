@@ -1,0 +1,303 @@
+### Scale Analysis
+### Dimension descriptives, scale intercorrelations, exploratory factor analysis
+### (1-, 2-, 3-factor solutions with fit comparison), parallel analysis,
+### factor network, reliability
+
+if (!exists("itemdata")) source("01_data_preparation.R")
+
+library(ggplot2)
+library(ggrepel)
+library(moments)
+library(Hmisc)
+library(psych)
+library(nFactors)
+library(qgraph)
+library(scales)
+
+dimlookup <- iteminfo %>% select(dimid, dimname) %>% distinct()
+
+### ── Dimension descriptive statistics ─────────────────────────────────────────
+
+dimensionstatistics <- (dimensiondata
+  %>% group_by(dimid)
+  %>% summarise(
+    N        = n(),
+    M        = mean(score),
+    SD       = sd(score),
+    Skew     = skewness(score),
+    Kurtosis = kurtosis(score),
+    MIN      = min(score),
+    MAX      = max(score),
+    .groups  = "drop"
+  )
+  %>% left_join(dimlookup, by = "dimid")
+)
+
+cat("Dimension statistics:\n")
+print(as.data.frame(dimensionstatistics), row.names = FALSE)
+
+### ── Dimension histograms ─────────────────────────────────────────────────────
+
+for (currentdim in dimensions) {
+  currentdimname <- dimlookup$dimname[dimlookup$dimid == currentdim]
+
+  currentdimvalues <- dimensiondata %>%
+    filter(dimid == currentdim) %>%
+    group_by(score) %>%
+    summarise(N = n(), .groups = "drop") %>%
+    mutate(rel = N / sum(N))
+
+  p <- ggplot(currentdimvalues) +
+    geom_bar(stat = "identity", aes(x = score, y = N), fill = "#1a0a4a") +
+    theme_bw() +
+    labs(x = "Sum Score", y = "Frequency") +
+    ggtitle(currentdimname)
+
+  ggsave(p, filename = file.path(outputpath, "dimstatistics",
+                                  paste0("hist-", currentdim, ".png")),
+         width = 6, height = 4)
+}
+
+cat("Dimension histograms saved.\n")
+
+### ── Scale intercorrelation heatmap ──────────────────────────────────────────
+
+dimensiondatamatrix <- (dimensiondata
+  %>% pivot_wider(names_from = dimid, values_from = score)
+  %>% select(-userID)
+)
+
+corrmatrix <- rcorr(as.matrix(dimensiondatamatrix))
+
+corrdata <- (as.data.frame(corrmatrix$r)
+  %>% rownames_to_column("dim1")
+  %>% pivot_longer(cols = -dim1, names_to = "dim2", values_to = "corr")
+  %>% left_join(dimlookup, by = c("dim1" = "dimid")) %>% rename(Dimension1 = dimname)
+  %>% left_join(dimlookup, by = c("dim2" = "dimid")) %>% rename(Dimension2 = dimname)
+)
+
+corrplot <- ggplot(corrdata, aes(x = Dimension1, y = Dimension2, fill = corr)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", corr)), size = 4) +
+  scale_fill_gradient2(low = "#2166ac", high = "#b2182b", mid = "white",
+                       midpoint = 0, limit = c(-1, 1),
+                       name = "Pearson\nCorrelation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1, size = 11),
+        axis.title = element_blank()) +
+  ggtitle("Scale Intercorrelations") +
+  coord_fixed()
+
+ggsave(corrplot, filename = file.path(outputpath, "dimstatistics", "dimcorrelation.png"),
+       width = 6, height = 5)
+
+cat("Correlation heatmap saved.\n")
+
+### ── Item correlation matrix (for FA) ────────────────────────────────────────
+
+allitemdata <- (itemdata
+  %>% select(userID, itemid, value)
+  %>% pivot_wider(names_from = itemid, values_from = value)
+  %>% select(-userID)
+  %>% select(paste0("M", 1:9), paste0("N", 1:9), paste0("P", 1:9))
+)
+
+### ── Parallel analysis & scree ───────────────────────────────────────────────
+
+ev <- eigen(cor(allitemdata))
+ap <- parallel(subject = nrow(allitemdata), var = ncol(allitemdata),
+               rep = 100, cent = 0.05)
+nS <- nScree(x = ev$values, aparallel = ap$eigen$qevpea)
+
+png(file.path(outputpath, "dimstatistics", "scree.png"), width = 800, height = 600, res = 120)
+plotnScree(nS)
+dev.off()
+
+cat("Scree plot saved.\n")
+
+### ── EFA: 1, 2, and 3 factor solutions ──────────────────────────────────────
+### The D-factor (dark core) debate: does 1 general factor or 3 specific ones
+### better describe the data? We compare all three solutions.
+
+fa1 <- fa(allitemdata, nfactors = 1, rotate = "none",    fm = "ml")
+fa2 <- fa(allitemdata, nfactors = 2, rotate = "oblimin", fm = "ml")
+fa3 <- fa(allitemdata, nfactors = 3, rotate = "oblimin", fm = "ml")
+
+fitcomparison <- data.frame(
+  Factors = c(1, 2, 3),
+  RMSEA   = c(fa1$RMSEA[1], fa2$RMSEA[1], fa3$RMSEA[1]),
+  TLI     = c(fa1$TLI,      fa2$TLI,      fa3$TLI),
+  BIC     = c(fa1$BIC,      fa2$BIC,      fa3$BIC),
+  CFI     = c(fa1$CFI,      fa2$CFI,      fa3$CFI)
+)
+
+cat("\nEFA Fit Comparison (1 vs 2 vs 3 factors):\n")
+print(fitcomparison, row.names = FALSE, digits = 3)
+
+### ── Factor loadings: 3-factor solution heatmap ─────────────────────────────
+
+dim_colors <- c(M = "#E07B39", N = "#5B8ED6", P = "#5AAF6A")
+
+factor_dim_map3 <- (as.data.frame(unclass(fa3$loadings))
+  %>% rownames_to_column("itemid")
+  %>% left_join(iteminfo %>% select(itemid, dimid), by = "itemid")
+  %>% pivot_longer(cols = starts_with("ML"), names_to = "factor", values_to = "loading")
+  %>% group_by(factor, dimid)
+  %>% summarise(mean_abs = mean(abs(loading)), .groups = "drop")
+  %>% group_by(factor)
+  %>% slice_max(mean_abs, n = 1)
+  %>% select(factor, mapped_dimid = dimid)
+)
+
+factor_label_map3 <- factor_dim_map3 %>%
+  left_join(dimlookup, by = c("mapped_dimid" = "dimid")) %>%
+  select(factor, factor_label = dimname)
+
+fcal3_heatmap <- (as.data.frame(unclass(fa3$loadings))
+  %>% rownames_to_column("itemid")
+  %>% left_join(iteminfo %>% select(itemid, dimid, index), by = "itemid")
+  %>% pivot_longer(cols = starts_with("ML"), names_to = "factor", values_to = "loading")
+  %>% left_join(factor_label_map3, by = "factor")
+  %>% arrange(dimid, index)
+  %>% mutate(itemid = factor(itemid, levels = rev(unique(itemid))))
+  %>% mutate(factor_label = factor(factor_label,
+       levels = unique(factor_label[order(factor)])))
+)
+
+heatmap3 <- ggplot(fcal3_heatmap, aes(x = factor_label, y = itemid, fill = loading)) +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.2f", loading)),
+            size = 2.8,
+            colour = ifelse(abs(fcal3_heatmap$loading) > 0.4, "white", "grey30")) +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b",
+                       midpoint = 0, limit = c(-0.7, 0.9),
+                       oob = squish, name = "Loading") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8), panel.grid = element_blank()) +
+  labs(x = "Factor (3-factor solution)", y = NULL) +
+  ggtitle("Factor Loadings Heatmap — 3 Factors (Oblimin)")
+
+ggsave(heatmap3, filename = file.path(outputpath, "dimstatistics", "fa_heatmap_3f.png"),
+       width = 6, height = 9)
+
+### ── Factor loadings: 1-factor solution (D-factor) ─────────────────────────
+
+fcal1 <- (as.data.frame(unclass(fa1$loadings))
+  %>% rownames_to_column("itemid")
+  %>% rename(D = ML1)
+  %>% left_join(iteminfo %>% select(itemid, dimid, dimname, index), by = "itemid")
+  %>% arrange(dimid, index)
+  %>% mutate(itemid = factor(itemid, levels = rev(unique(itemid))))
+)
+
+dfactor_plot <- ggplot(fcal1, aes(x = D, y = itemid, fill = dimname)) +
+  geom_bar(stat = "identity", colour = "white", linewidth = 0.2) +
+  scale_fill_manual(values = c(Machiavellianism = "#E07B39",
+                               Narcissism = "#5B8ED6",
+                               Psychopathy = "#5AAF6A")) +
+  geom_vline(xintercept = 0, linewidth = 0.5) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank()) +
+  labs(x = "Loading on D-factor", y = NULL, fill = "Dimension") +
+  ggtitle("1-Factor Solution: Dark Core (D-factor)")
+
+ggsave(dfactor_plot,
+       filename = file.path(outputpath, "dimstatistics", "fa_dfactor.png"),
+       width = 7, height = 8)
+
+cat("Factor loadings heatmap (3-factor) and D-factor plot saved.\n")
+
+### ── Item correlation network ────────────────────────────────────────────────
+
+item_corr <- cor(allitemdata)
+
+group_levels <- c("Machiavellianism", "Narcissism", "Psychopathy")
+group_colors <- c("#E07B39", "#5B8ED6", "#5AAF6A")
+
+item_dimids  <- iteminfo$dimid[match(colnames(item_corr), iteminfo$itemid)]
+item_groups  <- factor(
+  setNames(iteminfo$dimname, iteminfo$dimid)[item_dimids],
+  levels = group_levels
+)
+
+png(file.path(outputpath, "dimstatistics", "fa_network.png"),
+    width = 1200, height = 1000, res = 140)
+qgraph(item_corr,
+       layout           = "spring",
+       color            = group_colors,
+       labels           = colnames(item_corr),
+       label.cex        = 0.7,
+       label.scale.equal = TRUE,
+       minimum          = 0.1,
+       cut              = 0.25,
+       vsize            = 5.5,
+       esize            = 3,
+       borders          = FALSE,
+       title            = "Item Correlation Network — Short Dark Triad",
+       title.cex        = 1.2,
+       groups           = item_groups,
+       legend           = TRUE,
+       legend.cex       = 0.38,
+       posCol           = "#b2182b",
+       negCol           = "#2166ac",
+       mar              = c(2, 2, 4, 2))
+dev.off()
+
+cat("Network plot saved.\n")
+
+### ── Reliability ──────────────────────────────────────────────────────────────
+
+reltable <- data.frame(dimid = character(), Dimension = character(),
+                       N = numeric(), Cronbach = numeric(),
+                       Cronbach_st = numeric(), SplitHalf = numeric())
+
+for (currentdim in dimensions) {
+  currentdimname <- dimlookup$dimname[dimlookup$dimid == currentdim]
+
+  currentitemdata <- (itemdata
+    %>% left_join(iteminfo %>% select(itemid, dimid), by = "itemid")
+    %>% filter(dimid == currentdim)
+    %>% select(userID, itemid, value)
+    %>% pivot_wider(names_from = itemid, values_from = value)
+    %>% select(-userID)
+  )
+
+  ca <- psych::alpha(currentitemdata)
+  sh <- splitHalf(currentitemdata)
+
+  reltable <- reltable %>% add_row(
+    dimid       = currentdim,
+    Dimension   = currentdimname,
+    N           = nrow(currentitemdata),
+    Cronbach    = ca$total$raw_alpha,
+    Cronbach_st = ca$total$std.alpha,
+    SplitHalf   = sh$maxrb
+  )
+}
+
+cat("\nReliability:\n")
+print(as.data.frame(reltable), row.names = FALSE)
+
+reltable_long <- reltable %>%
+  pivot_longer(cols = c(Cronbach, Cronbach_st, SplitHalf),
+               names_to = "Typ", values_to = "rel")
+
+reliability_labels <- c(
+  Cronbach    = "Cronbach's α",
+  Cronbach_st = "Cronbach's α (std.)",
+  SplitHalf   = "Split-Half"
+)
+
+relplot <- ggplot(reltable_long, aes(x = Dimension, y = rel, colour = Typ)) +
+  geom_point(size = 3.5) +
+  theme_bw() +
+  scale_y_continuous(breaks = seq(0.1, 1, 0.1), limits = c(0.1, 1)) +
+  scale_colour_discrete(labels = reliability_labels) +
+  labs(x = NULL, y = "Reliability Coefficient", colour = "Method") +
+  ggtitle("Internal Consistency and Split-Half Reliability")
+
+ggsave(relplot, filename = file.path(outputpath, "dimstatistics", "reliability.png"),
+       width = 8, height = 5)
+
+cat("Reliability plot saved.\n")
+cat("\nAll analyses complete. Outputs in output_data/\n")

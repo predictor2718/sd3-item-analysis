@@ -10,10 +10,9 @@ required_packages <- c(
   "ggplot2",
   "ggrepel",
   "scales",
-  "Hmisc",
   "psych",
   "nFactors",
-  "qgraph"
+  "igraph"
 )
 
 cat("Checking and installing required packages...\n")

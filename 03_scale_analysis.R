@@ -8,10 +8,9 @@ if (!exists("itemdata")) source("01_data_preparation.R")
 library(ggplot2)
 library(ggrepel)
 library(moments)
-library(Hmisc)
 library(psych)
 library(nFactors)
-library(qgraph)
+library(igraph)
 library(scales)
 
 dimlookup <- iteminfo %>% select(dimid, dimname) %>% distinct()
@@ -67,9 +66,9 @@ dimensiondatamatrix <- (dimensiondata
   %>% select(-userID)
 )
 
-corrmatrix <- rcorr(as.matrix(dimensiondatamatrix))
+corrmatrix <- cor(as.matrix(dimensiondatamatrix))
 
-corrdata <- (as.data.frame(corrmatrix$r)
+corrdata <- (as.data.frame(corrmatrix)
   %>% rownames_to_column("dim1")
   %>% pivot_longer(cols = -dim1, names_to = "dim2", values_to = "corr")
   %>% left_join(dimlookup, by = c("dim1" = "dimid")) %>% rename(Dimension1 = dimname)
@@ -211,37 +210,52 @@ cat("Factor loadings heatmap (3-factor) and D-factor plot saved.\n")
 
 item_corr <- cor(allitemdata)
 
-group_levels <- c("Machiavellianism", "Narcissism", "Psychopathy")
-group_colors <- c("#E07B39", "#5B8ED6", "#5AAF6A")
+### build igraph from correlation matrix (only edges |r| >= 0.1)
+adj <- item_corr
+diag(adj) <- 0
+adj[abs(adj) < 0.1] <- 0
+g <- graph_from_adjacency_matrix(adj, mode = "undirected", weighted = TRUE, diag = FALSE)
 
-item_dimids  <- iteminfo$dimid[match(colnames(item_corr), iteminfo$itemid)]
-item_groups  <- factor(
-  setNames(iteminfo$dimname, iteminfo$dimid)[item_dimids],
-  levels = group_levels
-)
+set.seed(42)
+layout_coords <- layout_with_fr(g)
+node_df <- data.frame(
+  x     = layout_coords[, 1],
+  y     = layout_coords[, 2],
+  label = colnames(item_corr)
+) %>%
+  left_join(iteminfo %>% select(itemid, dimname), by = c("label" = "itemid"))
 
-png(file.path(outputpath, "dimstatistics", "fa_network.png"),
-    width = 1200, height = 1000, res = 140)
-qgraph(item_corr,
-       layout           = "spring",
-       color            = group_colors,
-       labels           = colnames(item_corr),
-       label.cex        = 0.7,
-       label.scale.equal = TRUE,
-       minimum          = 0.1,
-       cut              = 0.25,
-       vsize            = 5.5,
-       esize            = 3,
-       borders          = FALSE,
-       title            = "Item Correlation Network — Short Dark Triad",
-       title.cex        = 1.2,
-       groups           = item_groups,
-       legend           = TRUE,
-       legend.cex       = 0.38,
-       posCol           = "#b2182b",
-       negCol           = "#2166ac",
-       mar              = c(2, 2, 4, 2))
-dev.off()
+edges_df <- as_data_frame(g, what = "edges") %>%
+  left_join(node_df %>% select(label, x, y), by = c("from" = "label")) %>%
+  rename(x_from = x, y_from = y) %>%
+  left_join(node_df %>% select(label, x, y), by = c("to" = "label")) %>%
+  rename(x_to = x, y_to = y) %>%
+  mutate(edge_color = ifelse(weight > 0, "#b2182b", "#2166ac"),
+         alpha       = scales::rescale(abs(weight), to = c(0.1, 0.9)))
+
+dim_colors <- c(Machiavellianism = "#E07B39", Narcissism = "#5B8ED6", Psychopathy = "#5AAF6A")
+
+network_plot <- ggplot() +
+  geom_segment(data = edges_df,
+               aes(x = x_from, y = y_from, xend = x_to, yend = y_to,
+                   color = edge_color, alpha = alpha, linewidth = abs(weight)),
+               show.legend = FALSE) +
+  scale_color_identity() +
+  scale_linewidth(range = c(0.3, 2.5)) +
+  geom_point(data = node_df, aes(x = x, y = y, fill = dimname),
+             shape = 21, size = 8, color = "white", stroke = 0.5) +
+  scale_fill_manual(values = dim_colors) +
+  geom_text(data = node_df, aes(x = x, y = y, label = label),
+            size = 2.5, fontface = "bold", color = "white") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 13, face = "bold"),
+        plot.margin = margin(10, 10, 10, 10)) +
+  labs(fill = NULL, alpha = NULL, linewidth = NULL) +
+  ggtitle("Item Correlation Network — Short Dark Triad")
+
+ggsave(network_plot, filename = file.path(outputpath, "dimstatistics", "fa_network.png"),
+       width = 10, height = 9)
 
 cat("Network plot saved.\n")
 

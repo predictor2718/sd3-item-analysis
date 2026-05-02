@@ -206,6 +206,37 @@ ggsave(dfactor_plot,
 
 cat("Factor loadings heatmap (3-factor) and D-factor plot saved.\n")
 
+### ── Factor loadings scatter plot (like Big5 fa_loadings) ───────────────────
+
+fcal3_scatter <- (as.data.frame(unclass(fa3$loadings))
+  %>% rownames_to_column("itemid")
+  %>% left_join(iteminfo %>% select(itemid, dimid, dimname, index), by = "itemid")
+  %>% pivot_longer(cols = starts_with("ML"), names_to = "factor", values_to = "loading")
+  %>% left_join(factor_label_map3, by = "factor")
+  %>% left_join(factor_dim_map3, by = "factor")
+  %>% mutate(showlabel = (dimid == mapped_dimid))
+  %>% mutate(factor_label = factor(factor_label,
+       levels = unique(factor_label[order(factor)])))
+)
+
+scatter_loadings <- ggplot(fcal3_scatter,
+                           aes(x = factor_label, y = loading, colour = dimname)) +
+  geom_point(size = 2, alpha = 0.85) +
+  geom_label_repel(aes(label = ifelse(showlabel, itemid, "")),
+                   size = 3, max.overlaps = 20, show.legend = FALSE) +
+  scale_colour_manual(values = c(Machiavellianism = "#E07B39",
+                                 Narcissism = "#5B8ED6",
+                                 Psychopathy = "#5AAF6A")) +
+  theme_bw() +
+  labs(x = "Factor", y = "Factor Loading", colour = "Dimension") +
+  ggtitle("Exploratory Factor Analysis: Factor Loadings (3-factor oblimin)")
+
+ggsave(scatter_loadings,
+       filename = file.path(outputpath, "dimstatistics", "fa_loadings.png"),
+       width = 10, height = 6)
+
+cat("Factor loadings scatter plot saved.\n")
+
 ### ── Item correlation network ────────────────────────────────────────────────
 
 item_corr <- cor(allitemdata)
